@@ -81,7 +81,7 @@ Without `-swarm`, the build reads as finished: `after` and `gone` are true,
 |---|---|---|
 | `.comment("text", on: "id", place:)` | a pin pops onto the piece, a note card opens in the half of the screen away from it, folds back into the pin when the next comment starts | 0.6 |
 | `.erase` | selected, struck through in red, shrinks away | 0.8 |
-| `.restyle(from: "32 pt", to: "44 pt")` | selected; a dark inspector pill shows the old value, then strikes it and shows the new one. The view changes at the halfway point | 1.1–1.3 |
+| `.restyle(from: "32 pt", to: "44 pt")` | selected; a dark inspector pill shows the old value, then strikes it and shows the new one. The view changes at the halfway point. The pill goes beside the piece when there's room to its right, otherwise under it (over it near the bottom of the screen). Keep `from`/`to` short so it fits beside | 1.1–1.3 |
 | `.move(from: "id.was")` | selected at the old place and dragged to the new one, with a dashed ghost and a distance measure | 1.1–1.3 |
 
 The build film's moves still work, mostly for the pieces a decision adds.

@@ -308,9 +308,15 @@ import QuartzCore
         CGPoint(x: f.maxX + 30 > size.width ? max(4, f.minX - 22) : f.maxX - 4, y: max(f.minY + 4, 56))
     }
 
-    /// Whether an inspector pill for a piece at `f` sits above it (no room below).
-    func pillAbove(_ f: CGRect) -> Bool {
-        screen.height > 0 && f.maxY > screen.height - 110
+    /// Where a restyle's inspector pill sits: beside a piece with room to its
+    /// right (so it doesn't land on what's below), else under it, else over it.
+    enum PillPlace { case trailing, below, above }
+
+    func pillPlace(_ step: Step, _ f: CGRect) -> PillPlace {
+        guard case .restyle(let from, let to) = step.move else { return .below }
+        let width = CGFloat(from.count + to.count) * 6.4 + 36
+        if screen.width > 0, f.maxX + 30 + width < screen.width - 12, f.width < screen.width * 0.6 { return .trailing }
+        return screen.height > 0 && f.maxY > screen.height - 110 ? .above : .below
     }
 
     /// Pins a guide (or any step without a view of its own) to a point on
@@ -387,8 +393,13 @@ import QuartzCore
         case .restyle:
             // select the piece, then over to the inspector pill
             let e = CGFloat(SwarmCurve.inOut((p - 0.22) / 0.25))
-            let pillY = pillAbove(f) ? f.minY - 17 : f.maxY + 17
-            return CGPoint(x: f.midX + 26 * e, y: f.midY + (pillY - f.midY) * e)
+            let pill: CGPoint
+            switch pillPlace(step, f) {
+            case .trailing: pill = CGPoint(x: f.maxX + 60, y: f.midY + 6)
+            case .below: pill = CGPoint(x: f.midX + 26, y: f.maxY + 17)
+            case .above: pill = CGPoint(x: f.midX + 26, y: f.minY - 17)
+            }
+            return CGPoint(x: f.midX + (pill.x - f.midX) * e, y: f.midY + (pill.y - f.midY) * e)
         case .comment:
             let at = Self.pinPoint(f, in: size)
             return CGPoint(x: at.x + 3, y: at.y + 2)
@@ -556,7 +567,8 @@ private struct SwarmPiece: ViewModifier {
                 if let p = look.marks {
                     GeometryReader { geo in
                         SwarmMarks(move: look.move, p: p, size: geo.size,
-                                   above: build?.pillAbove(build?.frames[id] ?? .zero) ?? false, shift: look.shift)
+                                   pill: build.flatMap { b in b.step(id).map { b.pillPlace($0, b.frames[id] ?? .zero) } } ?? .below,
+                                   shift: look.shift)
                     }
                 }
             }
@@ -643,8 +655,8 @@ private struct SwarmMarks: View {
     let move: SwarmBuild.Move
     let p: Double
     let size: CGSize
-    /// Put an inspector pill above the piece rather than below it.
-    var above = false
+    /// Where an inspector pill goes.
+    var pill: SwarmBuild.PillPlace = .below
     /// For a move: from the new place back to the old one.
     var shift: CGSize = .zero
 
@@ -816,10 +828,11 @@ private struct SwarmMarks: View {
                 .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(SwarmInk.pill))
                 .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
                 .fixedSize()
-                .scaleEffect(0.85 + 0.15 * shown, anchor: above ? .bottom : .top)
+                .scaleEffect(0.85 + 0.15 * shown, anchor: pill == .above ? .bottom : pill == .below ? .top : .leading)
                 .opacity(shown)
-                .frame(width: size.width)
-                .offset(y: above ? -27 : size.height + 8)
+                .frame(width: pill == .trailing ? nil : size.width, alignment: .center)
+                .offset(x: pill == .trailing ? size.width + 30 : 0,   // clear of a comment pin
+                        y: pill == .above ? -27 : pill == .below ? size.height + 8 : (size.height - 19) / 2)
             }
             .frame(width: size.width, height: size.height, alignment: .topLeading)
         case .pop, .fade, .guide, .trace, .lift, .comment:
