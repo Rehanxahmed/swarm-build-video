@@ -18,6 +18,8 @@ Options:
   --name NAME       take file name without extension (default: take)
   --sim NAME        simulator name (default: "Swarm Recorder")
   --time HH:MM      status bar clock (default: 9:41)
+  --settle N        seconds recorded before the cue (default 1.5; use 3 for a
+                    Before → After film so the old screen gets its hold)
   --dark            record in dark appearance
   --keep            leave the simulator booted afterwards
 
@@ -91,6 +93,7 @@ def main():
     ap.add_argument('--name', default='take')
     ap.add_argument('--sim', default='Swarm Recorder')
     ap.add_argument('--time', default='9:41')
+    ap.add_argument('--settle', type=float, default=1.5)
     ap.add_argument('--dark', action='store_true')
     ap.add_argument('--keep', action='store_true')
     o = ap.parse_args()
@@ -122,7 +125,7 @@ def main():
         os.remove(out)
     rec = subprocess.Popen(['xcrun', 'simctl', 'io', udid, 'recordVideo', '--codec', 'h264', '--force', out],
                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-    wait_until(1.5)
+    wait_until(max(1.5, o.settle))
     if rec.poll() is not None:
         sys.exit('recordVideo stopped straight away:\n' + rec.stderr.read())
     cue = sim('spawn', udid, 'notifyutil', '-p', 'swarm.start')
