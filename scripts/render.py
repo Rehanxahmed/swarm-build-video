@@ -136,7 +136,10 @@ def main():
     color = ['-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709']
     enc = ['-c:v', 'libx264', '-preset', 'medium', '-crf', '16', '-r', '60', '-pix_fmt', 'yuv420p', *color,
            '-movflags', '+faststart', '-an']
-    clip = f'setpts=PTS-STARTPTS,fps=60,tpad=stop_mode=clone:stop_duration={pad:.2f}'
+    # The simulator only writes a frame when the screen changes, so a still
+    # stretch has no frames at all. Make it 60 fps first, then trim: seeking
+    # into a gap would start the cut at the next change instead.
+    clip = f'fps=60,trim=start={start:.3f},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={pad:.2f}'
     tmp = tempfile.mkdtemp(prefix='swarm-render-')
     main_mp4 = os.path.join(tmp, 'main.mp4') if decisions else out + '.mp4'
 
@@ -156,7 +159,7 @@ def main():
              f"[vm][3:v]overlay=0:0:format=rgb:shortest=1[vs];"
              f"[2:v][vs]overlay={g['sx']}:{g['sy']}:format=rgb:shortest=1")
     phone += (',format=rgba[ph];' + labels) if decisions else ','
-    run(['ffmpeg', '-v', 'error', '-y', '-ss', f'{start:.3f}', '-i', take,
+    run(['ffmpeg', '-v', 'error', '-y', '-i', take,
          *still, '-i', os.path.join(ASSETS, 'screen_mask.png'),
          *still, '-i', os.path.join(ASSETS, 'base.png'),
          *still, '-i', os.path.join(ASSETS, 'screen_over.png'),
@@ -166,7 +169,7 @@ def main():
          '-map', '[out]', '-t', f'{dur:.3f}', *enc, main_mp4])
 
     # the bare screen
-    run(['ffmpeg', '-v', 'error', '-y', '-ss', f'{start:.3f}', '-i', take,
+    run(['ffmpeg', '-v', 'error', '-y', '-i', take,
          '-vf', f'{clip},scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p',
          '-t', f'{dur:.3f}', *enc, out + '-screen.mp4'])
 
