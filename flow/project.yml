@@ -1,0 +1,39 @@
+# The Demo film's flow runner: a UI test that drives the app under its own
+# bundle id, so the app's project needs no test target. Regenerate with
+# `xcodegen generate` only if you change this file; the .xcodeproj is checked in.
+name: SwarmFlow
+options:
+  bundleIdPrefix: dev.swarm
+  deploymentTarget:
+    iOS: "17.0"
+targets:
+  FlowHost:
+    type: application
+    platform: iOS
+    sources: [Host]
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        PRODUCT_BUNDLE_IDENTIFIER: dev.swarm.flowhost
+        SWIFT_VERSION: "5.0"
+  SwarmFlow:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [Flow]
+    dependencies:
+      - target: FlowHost
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: dev.swarm.flow
+        TEST_TARGET_NAME: FlowHost
+        SWIFT_VERSION: "5.0"
+schemes:
+  SwarmFlow:
+    build:
+      targets:
+        FlowHost: all
+        SwarmFlow: [test]
+    test:
+      targets: [SwarmFlow]

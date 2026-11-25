@@ -1,5 +1,6 @@
 import SwiftUI
 import QuartzCore
+import UIKit
 
 // MARK: - SwarmKit
 //
@@ -1030,4 +1031,179 @@ private struct SwarmArrow: Shape {
         p.closeSubpath()
         return p
     }
+}
+
+// MARK: - Touches (the Demo film)
+//
+// A Demo film plays a real flow of the app (driven by a UI test) and shows
+// each finger as a soft dot, the way a screen recording with "show touches"
+// looks. Add one line to the app's root view:
+//
+//     ContentView().swarmTouches()
+//
+// (UIKit app: call `SwarmTouches.install()` once the window is up.) It does
+// nothing unless the app is launched with `-swarm-touches`. The dots are
+// drawn by the app itself, so they line up with the taps to the frame.
+
+extension View {
+    /// Shows touches as dots when launched with `-swarm-touches`.
+    func swarmTouches() -> some View {
+        onAppear { DispatchQueue.main.async { SwarmTouches.install() } }
+    }
+}
+
+enum SwarmTouches {
+    static var enabled: Bool { ProcessInfo.processInfo.arguments.contains("-swarm-touches") }
+    private static var windows: [ObjectIdentifier: SwarmTouchOverlay] = [:]
+
+    /// Watches every window of every connected scene. Safe to call more than once.
+    static func install() {
+        guard enabled else { return }
+        for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
+            for window in scene.windows where !(window is SwarmTouchOverlay) {
+                let key = ObjectIdentifier(window)
+                guard windows[key] == nil else { continue }
+                let overlay = SwarmTouchOverlay(windowScene: scene)
+                overlay.frame = window.frame
+                overlay.windowLevel = .alert + 100
+                overlay.isHidden = false
+                windows[key] = overlay
+                let watcher = SwarmTouchWatcher(target: nil, action: nil)
+                watcher.overlay = overlay
+                window.addGestureRecognizer(watcher)
+            }
+        }
+    }
+}
+
+/// A window above the app that only draws; touches go straight through it.
+final class SwarmTouchOverlay: UIWindow {
+    private var dots: [ObjectIdentifier: UIView] = [:]
+    private var born: [ObjectIdentifier: CFTimeInterval] = [:]
+    /// A UI test's tap is down and up in a few milliseconds; keep each dot
+    /// pressed at least this long so the viewer sees it.
+    static let minimumPress: CFTimeInterval = 0.28
+
+    override init(windowScene: UIWindowScene) {
+        super.init(windowScene: windowScene)
+        isUserInteractionEnabled = false
+        backgroundColor = .clear
+        rootViewController = UIViewController()
+        rootViewController?.view.backgroundColor = .clear
+        rootViewController?.view.isUserInteractionEnabled = false
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? { nil }
+
+    func began(_ touch: UITouch, in window: UIWindow) {
+        let dot = Self.makeDot()
+        dot.center = window.convert(touch.location(in: window), to: self)
+        dot.transform = CGAffineTransform(scaleX: 0.55, y: 0.55)
+        dot.alpha = 0
+        addSubview(dot)
+        dots[ObjectIdentifier(touch)] = dot
+        born[ObjectIdentifier(touch)] = CACurrentMediaTime()
+        UIView.animate(withDuration: 0.14, delay: 0, options: [.curveEaseOut]) {
+            dot.transform = CGAffineTransform(scaleX: 0.86, y: 0.86)   // pressed in
+            dot.alpha = 1
+        }
+    }
+
+    func moved(_ touch: UITouch, in window: UIWindow) {
+        dots[ObjectIdentifier(touch)]?.center = window.convert(touch.location(in: window), to: self)
+    }
+
+    func ended(_ touch: UITouch) {
+        let key = ObjectIdentifier(touch)
+        guard let dot = dots.removeValue(forKey: key) else { return }
+        let age = CACurrentMediaTime() - (born.removeValue(forKey: key) ?? 0)
+        let wait = max(0, Self.minimumPress - age)
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait) { self.release(dot) }
+    }
+
+    private func release(_ dot: UIView) {
+        // lets go: the dot springs back to size, then a ring opens and fades
+        let ring = Self.makeRing()
+        ring.center = dot.center
+        insertSubview(ring, belowSubview: dot)
+        UIView.animate(withDuration: 0.4, delay: 0, options: [.curveEaseOut]) {
+            ring.transform = CGAffineTransform(scaleX: 1.7, y: 1.7)
+            ring.alpha = 0
+        } completion: { _ in ring.removeFromSuperview() }
+        UIView.animate(withDuration: 0.12, delay: 0, options: [.curveEaseOut]) {
+            dot.transform = .identity
+        } completion: { _ in
+            UIView.animate(withDuration: 0.28, delay: 0.04, options: [.curveEaseIn]) {
+                dot.alpha = 0
+                dot.transform = CGAffineTransform(scaleX: 1.08, y: 1.08)
+            } completion: { _ in dot.removeFromSuperview() }
+        }
+    }
+
+    static let size: CGFloat = 46
+
+    static func makeDot() -> UIView {
+        let v = UIView(frame: CGRect(x: 0, y: 0, width: size, height: size))
+        v.isUserInteractionEnabled = false
+        v.layer.cornerRadius = size / 2
+        v.backgroundColor = UIColor(white: 0.12, alpha: 0.28)
+        v.layer.borderColor = UIColor(white: 1, alpha: 0.95).cgColor
+        v.layer.borderWidth = 2.5
+        v.layer.shadowColor = UIColor.black.cgColor
+        v.layer.shadowOpacity = 0.22
+        v.layer.shadowRadius = 6
+        v.layer.shadowOffset = CGSize(width: 0, height: 2)
+        return v
+    }
+
+    static func makeRing() -> UIView {
+        let v = UIView(frame: CGRect(x: 0, y: 0, width: size, height: size))
+        v.isUserInteractionEnabled = false
+        v.layer.cornerRadius = size / 2
+        v.layer.borderColor = UIColor(white: 0.12, alpha: 0.35).cgColor
+        v.layer.borderWidth = 2
+        return v
+    }
+}
+
+/// Sees every touch in its window without taking part: it never recognises,
+/// never cancels or delays a touch, and lets every other gesture run.
+final class SwarmTouchWatcher: UIGestureRecognizer, UIGestureRecognizerDelegate {
+    weak var overlay: SwarmTouchOverlay?
+
+    override init(target: Any?, action: Selector?) {
+        super.init(target: target, action: action)
+        cancelsTouchesInView = false
+        delaysTouchesBegan = false
+        delaysTouchesEnded = false
+        delegate = self
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard let window = view as? UIWindow else { return }
+        touches.forEach { overlay?.began($0, in: window) }
+    }
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard let window = view as? UIWindow else { return }
+        touches.forEach { overlay?.moved($0, in: window) }
+    }
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+        touches.forEach { overlay?.ended($0) }
+        finishIfDone(event)
+    }
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+        // a scroll view taking over cancels the touch for the views, but the
+        // finger is still there: keep the dot until it really lifts
+        touches.filter { $0.phase == .ended || $0.phase == .cancelled }.forEach { overlay?.ended($0) }
+        finishIfDone(event)
+    }
+
+    private func finishIfDone(_ event: UIEvent) {
+        let live = (event.allTouches ?? []).filter { $0.phase != .ended && $0.phase != .cancelled }
+        if live.isEmpty { state = .failed }
+    }
+
+    func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+    func gestureRecognizer(_ g: UIGestureRecognizer, shouldBeRequiredToFailBy other: UIGestureRecognizer) -> Bool { false }
+    func gestureRecognizer(_ g: UIGestureRecognizer, shouldRequireFailureOf other: UIGestureRecognizer) -> Bool { false }
 }

@@ -1,16 +1,17 @@
 ---
 name: swarm-build-video
-description: Make a "swarm" video of an iOS app screen with Figma-style multiplayer cursors, recorded on the iOS Simulator and rendered as an MP4 in a phone mockup. Two films. Build (12 s), where the cursors build the real SwiftUI screen from nothing (red guides, grey boxes that turn into cards, typed text, alt-drag copies, one joke typo fixed). Before → After (about 19 s), where the screen opens on the old design and the cursors make each product design decision on it (comment pins explaining why, strike-and-remove, restyles with an inspector pill, moves), ending on the real new design and a side-by-side end card. Use when someone asks for a swarm video, a swarm build, "cursors building my screen", or a before/after, redesign or design-decision video of a SwiftUI screen. Needs a Mac with Xcode, the iOS Simulator and ffmpeg.
+description: Make videos of an iOS app in a phone mockup, recorded on the iOS Simulator, with Figma-style multiplayer cursors. Three films. Build (12 s): cursors build the real SwiftUI screen from nothing (guides, grey boxes that become cards, typed text, alt-drag copies, a typo fixed). Before → After (~19 s): the screen opens on the old design and the cursors make each design decision (comment pins saying why, strike-and-remove, restyles with an inspector pill, moves), ending on the real new design and a side-by-side end card. Demo (10–20 s): a real flow tapped through by a UI test, touches shown as dots, a caption per step and an end card of key frames; also takes an existing screen recording. Use for a swarm video or build, "cursors building my screen", a before/after, redesign or design-decision video, or a demo, walkthrough, feature or flow video of an iOS app. Needs a Mac with Xcode, the iOS Simulator and ffmpeg.
 ---
 
 # Swarm build video
 
-One skill, two films. Both use the same engine, scripts and phone mockup.
+One skill, three films. They share the engine, scripts and phone mockup.
 
 | Film | What it shows | Length |
 |---|---|---|
 | **Build** (default) | four cursors build the screen from an empty page | 12 s |
 | **Before → After** | the old screen; the cursors make each design decision on it; the new screen; an end card with both | ~19 s |
+| **Demo** | a real flow of the app, touches shown as dots, a caption per step; an end card of key frames | 10–20 s |
 
 ## The Build film
 
@@ -43,6 +44,17 @@ the two screens side by side with the decisions listed under them.
 Both ends are real: the first frame is the old screen as it really looked,
 the last frame is the new one.
 
+## The Demo film
+
+For showing what the app does. Nothing is built: the app runs as it is, and a
+UI test taps through a flow ("log water, start a workout, see it live, it
+lands in your day"). The app draws each finger as a soft dot. Under the phone,
+a caption pill says what each part shows. It ends on a strip of key frames,
+one per caption, numbered. If the person already has a screen recording, the
+same mockup, captions and end card go on that instead.
+
+Read `reference/demo.md` for the whole recipe.
+
 ## Outputs
 
 In `~/Movies/Swarm/`:
@@ -51,7 +63,8 @@ In `~/Movies/Swarm/`:
 - `<name>-screen.mp4`: the bare screen
 - `<name>-sheet.png`: a contact sheet
 - Before → After also writes `<name>-compare.png`, the end card as a still for case studies and slides
-- `--vertical` adds `<name>-9x16.mp4` (1080×1920) for stories and reels, for either film
+- Demo also writes `<name>-strip.png`, its end card as a still
+- `--vertical` adds `<name>-9x16.mp4` (1080×1920) for stories and reels, for any film
 
 **Keep it quick.** Do one build pass, check the stills and the contact sheet,
 then deliver. Offer a polish pass rather than looping on it unasked.
@@ -59,7 +72,7 @@ then deliver. Offer a polish pass rather than looping on it unasked.
 ## Ground rules
 
 - **Never touch the person's real project.** Everything happens in a copy.
-- Only SwiftUI screens. If the screen is UIKit, say so and stop.
+- Build and Before → After need SwiftUI screens. If the screen is UIKit, say so and offer a Demo film, which works for any app.
 - Show the screen at its best: real layout, believable full content (seed
   demo data in the copy), no login, onboarding or empty states.
 - iOS 17+ for the engine. In the copy you may raise the deployment target.
@@ -78,8 +91,14 @@ skill's own folder (where this file is) as `SKILL_DIR`.
 ### 2. Pick the film
 
 - They mention before/after, a redesign, "what changed", design decisions or a comparison: **Before → After**.
+- They want to show a feature, a flow, how something works, a walkthrough or a demo, or hand you a screen recording: **Demo**.
 - They ask for a swarm video or build with nothing else: **Build**.
-- Unclear: ask which, in one question, with the two lengths.
+- Unclear: ask which, in one question, with the three lengths.
+
+For Demo, also settle (read `reference/demo.md` first):
+
+- **The source.** A scripted flow (the default), or a recording they give you. For a recording, skip to the end of `reference/demo.md`: no copy, no build, just captions and `render.py`.
+- **The flow and its captions**: 2–4 beats, one caption each, under 40 characters, saying what it does for them. Confirm the list.
 
 For Before → After, also settle (read `reference/decisions.md` first):
 
@@ -152,6 +171,12 @@ reference screenshots, with `still.py --at 99 --out <file>` on a plain build
 Then build the morph screen in `$WORK`, write `$WORK/decisions.json`, and
 skip to step 8.
 
+**Demo:** follow `SKILL_DIR/reference/demo.md`. Add `.swarmTouches()` to the
+app's root view, seed believable data, then copy `SKILL_DIR/flow` to
+`$WORK-flow` and write the flow in `$WORK-flow/Flow/Flow.swift`. Skip step 6's
+"open straight on the screen" if the flow starts somewhere else, then go to
+step 8.
+
 **Build:** read `SKILL_DIR/reference/choreography.md` first. It has the moves, the
 timing, the patterns (cards, repeated rows, images, the joke fix) and the
 gotchas.
@@ -203,6 +228,9 @@ Fix what's off, rebuild, re-check.
 
 Take single-moment stills for compare.py: `still.py --at 0.3 --out still-0.3.png`.
 
+**Demo** skips these stills: the take is the check. If a flow fails, read the
+first `error:` line `record_flow.py` prints; it's nearly always a selector.
+
 ### 10. Record and render
 
 ```bash
@@ -228,7 +256,23 @@ It holds the Before for 1.8 s and the After for 1.6 s, then shows the end card
 for 3.2 s (`--before-hold`, `--after-hold`, `--card` to change). The end card
 needs `swift`, which comes with Xcode.
 
+**Demo** records with `record_flow.py` and renders in demo mode:
+
+```bash
+python3 "$SKILL_DIR/scripts/record_flow.py" --app "$APP" --flow "$WORK-flow" --out "$WORK/takes" --name flow
+python3 "$SKILL_DIR/scripts/render.py" "$WORK/takes/flow.mov" --mode demo \
+  --captions "$WORK/takes/flow.json" --out ~/Movies/Swarm/<App>-<Feature>
+```
+
+For their own recording, only the second command, with the captions file you
+wrote.
+
 ### 11. Look, then deliver
+
+For **Demo**, read `<name>-sheet.png` and `<name>-strip.png`: every tap shows
+a dot, each caption is up while its part plays, the end card's frames show
+each beat (not a half-finished animation), and the last screen holds. Deliver
+the videos, the strip and the captions.
 
 Read `<name>-sheet.png`. For **Before → After**, check that it opens on the
 old screen labelled Before, takes the decisions one at a time with a readable
@@ -268,3 +312,7 @@ If something is clearly broken, fix it once and re-record. Then tell the person:
 | A moved piece starts at its new place in the Before | Its stand-in id doesn't match `.move(from:)`, or the stand-in isn't on screen. |
 | A note card covers the change | Pass `place: .top` or `.bottom` on that `.comment`. |
 | render.py warns there's not enough Before | Record with a longer `--settle`. |
+| Demo: "The flow never said it was ready" | The flow didn't reach `SwarmDemo.start()`, or the app didn't launch. The xcodebuild log lines it prints say which. |
+| Demo: "Failed to tap … No matches found" | A selector. A list row's button label is all its text joined; tap `app.staticTexts["Title"]` instead. Print `app.debugDescription` to see the tree. |
+| Demo: no touch dots | `.swarmTouches()` missing from the root view, or the engine isn't in the target. |
+| Demo: a caption shows after its change | Put `caption(…)` before the tap it describes. Each tap takes about a second. |
