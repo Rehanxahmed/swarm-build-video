@@ -20,6 +20,11 @@ import QuartzCore
 //             .swarmStage(build)                          // on the screen's ROOT view
 //     }
 //
+// Before → After films use the same wiring. Untagged things show from the
+// start, old pieces leave with `.erase` (and `gone(_:)`), new ones arrive with
+// `due(_:)` and the build moves, restyles read `after(_:)`, and `.comment`
+// pins say why. See reference/decisions.md.
+//
 // Launch arguments:
 //     -swarm            play the build (without it the screen opens finished)
 //     -swarm-cue        wait for the recorder's cue (Darwin notification
@@ -52,6 +57,35 @@ import QuartzCore
         case trace
         /// Press and pull upward.
         case lift
+
+        // Before → After films: the screen opens on the old design and the
+        // cursors make each decision on it.
+
+        /// Selected, struck through and shrunk away. Visible before its step,
+        /// gone after (take it out of the layout with `gone(_:)`).
+        case erase
+        /// Dragged from where it used to sit to where it sits now, leaving a
+        /// dashed ghost behind. `from` is the id of a stand-in at the old place
+        /// (an invisible view the same size, tagged `.swarm(from)`), which also
+        /// keeps the old layout until `after(_:)` lets it go.
+        case move(from: String)
+        /// Selected while an inspector pill shows `from → to`. The view itself
+        /// changes halfway through: read `after(_:)` to pick the new value.
+        case restyle(from: String, to: String)
+        /// A comment pin with a note, dropped on the view tagged with this id
+        /// (or with `on`, or a `pin` point). The note card opens in the half of
+        /// the screen away from the pin, so it never covers the change (`place`
+        /// overrides that), stays open until the next comment starts, then
+        /// folds into its numbered pin.
+        case comment(_ text: String, on: String? = nil, place: VerticalEdge? = nil)
+    }
+
+    /// A `.comment` step with its number and when its card folds away.
+    struct Note {
+        var step: Step
+        var text: String
+        var number: Int
+        var closes: Double
     }
 
     struct Step {
@@ -108,10 +142,17 @@ import QuartzCore
     private(set) var phase: Phase
     /// Seconds into the build.
     private(set) var time: Double = 0
+    /// Bumped once the first layouts are in, so pieces that place themselves
+    /// by other pieces' frames (moves) redraw while the screen waits.
+    private(set) var settled = 0
 
     /// Where each tagged view sits on screen, and paths for `.trace` steps.
     @ObservationIgnored var frames: [String: CGRect] = [:]
     @ObservationIgnored var paths: [String: [CGPoint]] = [:]
+    /// The whole screen, safe areas included.
+    @ObservationIgnored var screen: CGSize = .zero
+    /// The `.comment` steps in the order they're made.
+    @ObservationIgnored private(set) var notes: [Note] = []
     @ObservationIgnored private let index: [String: Int]
     @ObservationIgnored private var ticker: SwarmTicker?
     @ObservationIgnored private var began: CFTimeInterval = 0
@@ -127,6 +168,12 @@ import QuartzCore
         var index: [String: Int] = [:]
         for (i, step) in steps.enumerated() where index[step.id] == nil { index[step.id] = i }
         self.index = index
+        let comments = steps.filter { if case .comment = $0.move { true } else { false } }.sorted { $0.start < $1.start }
+        notes = comments.enumerated().map { i, step in
+            guard case .comment(let text, _, _) = step.move else { fatalError() }
+            let next = i + 1 < comments.count ? comments[i + 1].start : self.wrap
+            return Note(step: step, text: text, number: i + 1, closes: max(step.end + 0.4, next))
+        }
     }
 
     // MARK: Clock
@@ -167,6 +214,9 @@ import QuartzCore
     func arm() {
         guard !armed, phase == .pending else { return }
         armed = true
+        for delay in [0.25, 0.8] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { self.settled += 1 }
+        }
         let args = ProcessInfo.processInfo.arguments
         if let i = args.firstIndex(of: "-swarm-at"), i + 1 < args.count, let t = Double(args[i + 1]) {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.hold(at: t) }
@@ -217,6 +267,58 @@ import QuartzCore
     /// still showing the original's content, before it's retyped.
     func stale(_ id: String) -> Bool { phase == .running && amount(id) < 0.66 }
 
+    /// For `.restyle` steps: false while the old look shows, true once the
+    /// change lands (halfway through), and true whenever the build isn't playing.
+    func after(_ id: String) -> Bool { amount(id) >= 0.5 }
+
+    /// For `.erase` steps: true once the piece has shrunk away, so it can leave
+    /// the layout (`if !build.gone("old") { … }`) and the rest closes up.
+    func gone(_ id: String) -> Bool { amount(id) >= 1 }
+
+    /// For new things that take up room: true from just before their step
+    /// (`lead` seconds), so the layout opens a gap first and the piece is then
+    /// built into it (`if build.due("new") { … }`).
+    func due(_ id: String, lead: Double = 0.45) -> Bool {
+        switch phase {
+        case .done: return true
+        case .pending: return false
+        case .running:
+            guard let step = step(id) else { return true }
+            return time >= step.start - lead
+        }
+    }
+
+    /// The rectangle a step works on: its own view, or for a comment the view
+    /// it's on.
+    func anchor(_ step: Step) -> CGRect? {
+        if case .comment(_, let on?, _) = step.move, let f = frames[on] { return f }
+        return frames[step.id]
+    }
+
+    /// For a `.move`: how far the old place is from the new one (centre to centre).
+    func shift(_ step: Step) -> CGSize {
+        _ = settled
+        guard case .move(let from) = step.move, let was = frames[from], let now = frames[step.id] else { return .zero }
+        return CGSize(width: was.midX - now.midX, height: was.midY - now.midY)
+    }
+
+    /// Where a comment's pin points, given its anchor.
+    static func pinPoint(_ f: CGRect, in size: CGSize) -> CGPoint {
+        // top-trailing corner, or top-leading when that would run off the edge
+        CGPoint(x: f.maxX + 30 > size.width ? max(4, f.minX - 22) : f.maxX - 4, y: max(f.minY + 4, 56))
+    }
+
+    /// Where a restyle's inspector pill sits: beside a piece with room to its
+    /// right (so it doesn't land on what's below), else under it, else over it.
+    enum PillPlace { case trailing, below, above }
+
+    func pillPlace(_ step: Step, _ f: CGRect) -> PillPlace {
+        guard case .restyle(let from, let to) = step.move else { return .below }
+        let width = CGFloat(from.count + to.count) * 6.4 + 36
+        if screen.width > 0, f.maxX + 30 + width < screen.width - 12, f.width < screen.width * 0.6 { return .trailing }
+        return screen.height > 0 && f.maxY > screen.height - 110 ? .above : .below
+    }
+
     /// Pins a guide (or any step without a view of its own) to a point on
     /// screen. A vertical guide stops at `x`; a horizontal one at `y`.
     func pin(_ id: String, x: CGFloat, y: CGFloat) {
@@ -235,7 +337,7 @@ import QuartzCore
     /// one, or on its way in from (or back out to) its edge of the screen.
     func position(of cursor: Int, in size: CGSize) -> CGPoint {
         let home = CGPoint(x: cursors[cursor].home.x * size.width, y: cursors[cursor].home.y * size.height)
-        let mine = steps.filter { $0.cursor == cursor && (frames[$0.id] != nil || paths[$0.id] != nil) }
+        let mine = steps.filter { $0.cursor == cursor && (anchor($0) != nil || paths[$0.id] != nil) }
         guard let first = mine.first, let last = mine.last else { return home }
 
         let leave = wrap + Double(cursor) * 0.12
@@ -280,8 +382,27 @@ import QuartzCore
     /// The cursor's place at a share `p` of a step.
     private func spot(_ step: Step, _ p: Double, _ size: CGSize) -> CGPoint {
         let p = max(0, min(1, p))
-        let f = frames[step.id] ?? .zero
+        let f = anchor(step) ?? .zero
         switch step.move {
+        case .erase:
+            // click it, then hold still while it goes
+            return CGPoint(x: f.midX + 4, y: f.midY + 3)
+        case .move:
+            let d = shift(step), e = CGFloat(SwarmCurve.inOut((p - 0.2) / 0.55))
+            return CGPoint(x: f.midX + d.width * (1 - e) + 4, y: f.midY + d.height * (1 - e) + 3)
+        case .restyle:
+            // select the piece, then over to the inspector pill
+            let e = CGFloat(SwarmCurve.inOut((p - 0.22) / 0.25))
+            let pill: CGPoint
+            switch pillPlace(step, f) {
+            case .trailing: pill = CGPoint(x: f.maxX + 60, y: f.midY + 6)
+            case .below: pill = CGPoint(x: f.midX + 26, y: f.maxY + 17)
+            case .above: pill = CGPoint(x: f.midX + 26, y: f.minY - 17)
+            }
+            return CGPoint(x: f.midX + (pill.x - f.midX) * e, y: f.midY + (pill.y - f.midY) * e)
+        case .comment:
+            let at = Self.pinPoint(f, in: size)
+            return CGPoint(x: at.x + 3, y: at.y + 2)
         case .draw:
             let e = CGFloat(SwarmCurve.out(min(1, p / 0.5)))
             return CGPoint(x: f.minX + f.width * e, y: f.minY + f.height * e)
@@ -378,6 +499,14 @@ private struct SwarmStage: ViewModifier {
     func body(content: Content) -> some View {
         content
             .overlay { SwarmCursors(build: build) }
+            .background {
+                GeometryReader { geo in
+                    Color.clear
+                        .onAppear { build.screen = geo.size }
+                        .onChange(of: geo.size) { _, size in build.screen = size }
+                }
+                .ignoresSafeArea()
+            }
             .environment(build)
             .onAppear { build.arm() }
     }
@@ -394,6 +523,11 @@ private enum SwarmInk {
     static let select = Color(red: 13 / 255, green: 153 / 255, blue: 1)
     static let guide = Color(red: 242 / 255, green: 72 / 255, blue: 34 / 255)
     static let blank = Color(red: 217 / 255, green: 217 / 255, blue: 217 / 255)
+    static let ink = Color(red: 30 / 255, green: 30 / 255, blue: 30 / 255)
+    /// The inspector pill: near-black on light screens, a lifted grey on dark ones.
+    static let pill = Color(UIColor { $0.userInterfaceStyle == .dark
+        ? UIColor(red: 72 / 255, green: 72 / 255, blue: 76 / 255, alpha: 1)
+        : UIColor(red: 30 / 255, green: 30 / 255, blue: 30 / 255, alpha: 1) })
 }
 
 private struct SwarmPiece: ViewModifier {
@@ -411,6 +545,7 @@ private struct SwarmPiece: ViewModifier {
         /// Progress to hand the marks, when there are any to draw.
         var marks: Double?
         var move: SwarmBuild.Move = .fade
+        var shift: CGSize = .zero
     }
 
     func body(content: Content) -> some View {
@@ -430,7 +565,11 @@ private struct SwarmPiece: ViewModifier {
             .opacity(look.opacity)
             .overlay {
                 if let p = look.marks {
-                    GeometryReader { geo in SwarmMarks(move: look.move, p: p, size: geo.size) }
+                    GeometryReader { geo in
+                        SwarmMarks(move: look.move, p: p, size: geo.size,
+                                   pill: build.flatMap { b in b.step(id).map { b.pillPlace($0, b.frames[id] ?? .zero) } } ?? .below,
+                                   shift: look.shift)
+                    }
                 }
             }
             .scaleEffect(look.scale, anchor: look.anchor)
@@ -439,8 +578,13 @@ private struct SwarmPiece: ViewModifier {
     }
 
     private var look: Look {
-        guard let build, build.phase != .done, let step = build.step(id) else { return Look() }
+        guard let build, let step = build.step(id) else { return Look() }
         var look = Look()
+        if build.phase == .done {
+            // the finished screen: erased pieces stay erased
+            if case .erase = step.move { look.opacity = 0 }
+            return look
+        }
         look.move = step.move
         // before the build begins everything waits unseen, except what an edit will later change
         let p = build.phase == .pending ? -1 : (build.time - step.start) / step.length
@@ -476,6 +620,24 @@ private struct SwarmPiece: ViewModifier {
             look.marks = nil
         case .guide, .trace, .lift:
             break
+        case .erase:
+            // there from the start; shrinks away in the second half
+            if p >= 1 {
+                look.opacity = 0
+            } else if p >= 0.55 {
+                let k = SwarmCurve.inOut((p - 0.55) / 0.4)
+                look.opacity = 1 - k
+                look.scale = 1 - 0.18 * CGFloat(k)
+            }
+        case .move:
+            let d = build.shift(step), e = CGFloat(SwarmCurve.inOut((p - 0.2) / 0.55))
+            look.offset = d.width * (1 - e)
+            look.offsetY = d.height * (1 - e)
+            look.shift = d
+        case .restyle:
+            break
+        case .comment:
+            look.marks = nil
         }
         return look
     }
@@ -493,6 +655,10 @@ private struct SwarmMarks: View {
     let move: SwarmBuild.Move
     let p: Double
     let size: CGSize
+    /// Where an inspector pill goes.
+    var pill: SwarmBuild.PillPlace = .below
+    /// For a move: from the new place back to the old one.
+    var shift: CGSize = .zero
 
     var body: some View {
         switch move {
@@ -599,7 +765,77 @@ private struct SwarmMarks: View {
                     .strokeBorder(SwarmInk.select.opacity(0.75), lineWidth: 1)
                     .padding(-3)
             }
-        case .pop, .fade, .guide, .trace, .lift:
+        case .erase:
+            // selected, struck through, then gone with the piece
+            let strike = CGFloat(SwarmCurve.out((p - 0.2) / 0.25))
+            let fade = 1 - SwarmCurve.inOut((p - 0.55) / 0.35)
+            ZStack(alignment: .topLeading) {
+                Rectangle()
+                    .fill(SwarmInk.guide.opacity(0.08 * Double(strike)))
+                    .padding(-3)
+                selection(size)
+                Rectangle()
+                    .fill(SwarmInk.guide)
+                    .frame(width: (size.width + 8) * strike, height: 2)
+                    .offset(x: -4, y: size.height / 2 - 1)
+            }
+            .frame(width: size.width, height: size.height, alignment: .topLeading)
+            .opacity(fade)
+        case .move:
+            // selected and dragged; a dashed ghost stays where it was
+            let dx = shift.width, dy = shift.height
+            let e = CGFloat(SwarmCurve.inOut((p - 0.2) / 0.55))
+            let gone = hypot(dx, dy) * e
+            ZStack(alignment: .topLeading) {
+                Rectangle()
+                    .strokeBorder(SwarmInk.select.opacity(0.7), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                    .frame(width: size.width, height: size.height)
+                    .offset(x: dx * e, y: dy * e)
+                    .opacity(1 - SwarmCurve.inOut((p - 0.4) / 0.12))   // until the stand-in lets go
+                selection(size)
+                    .opacity(1 - SwarmCurve.inOut((p - 0.82) / 0.18))
+                measure(Int(gone.rounded()))
+                    .frame(width: size.width)
+                    .offset(y: dy < 0 ? size.height + 7 : -19)
+                    .opacity(gone > 12 && p < 0.85 ? 1 : 0)
+            }
+            .frame(width: size.width, height: size.height, alignment: .topLeading)
+        case .restyle(let from, let to):
+            // selected; the inspector pill shows the old value, then the new
+            let shown = SwarmCurve.out((p - 0.12) / 0.18) * (1 - SwarmCurve.inOut((p - 0.86) / 0.14))
+            let landed = p >= 0.5
+            ZStack(alignment: .topLeading) {
+                Rectangle()
+                    .strokeBorder(SwarmInk.select, lineWidth: 1.5)
+                    .padding(-3)
+                    .opacity(1 - SwarmCurve.inOut((p - 0.86) / 0.14))
+                HStack(spacing: 5) {
+                    Text(from)
+                        .foregroundStyle(.white.opacity(landed ? 0.45 : 0.95))
+                        .strikethrough(landed, color: .white.opacity(0.45))
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 8.5, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.5))
+                        .opacity(landed ? 1 : 0)
+                    Text(to)
+                        .foregroundStyle(.white)
+                        .opacity(landed ? 1 : 0)
+                }
+                .font(.system(size: 10.5, weight: .semibold))
+                .monospacedDigit()
+                .padding(.horizontal, 7)
+                .frame(height: 19)
+                .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(SwarmInk.pill))
+                .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
+                .fixedSize()
+                .scaleEffect(0.85 + 0.15 * shown, anchor: pill == .above ? .bottom : pill == .below ? .top : .leading)
+                .opacity(shown)
+                .frame(width: pill == .trailing ? nil : size.width, alignment: .center)
+                .offset(x: pill == .trailing ? size.width + 30 : 0,   // clear of a comment pin
+                        y: pill == .above ? -27 : pill == .below ? size.height + 8 : (size.height - 19) / 2)
+            }
+            .frame(width: size.width, height: size.height, alignment: .topLeading)
+        case .pop, .fade, .guide, .trace, .lift, .comment:
             EmptyView()
         }
     }
@@ -652,6 +888,11 @@ struct SwarmCursors: View {
                             guide(build.steps[i], vertical: vertical, frame: frame, size: geo.size, time: time)
                         }
                     }
+                    ForEach(build.notes.indices, id: \.self) { i in
+                        if let frame = build.anchor(build.notes[i].step) {
+                            note(build.notes[i], frame: frame, size: geo.size, time: time)
+                        }
+                    }
                     ForEach(build.cursors.indices, id: \.self) { i in
                         let at = build.position(of: i, in: geo.size)
                         pointer(build.cursors[i])
@@ -677,6 +918,79 @@ struct SwarmCursors: View {
             .frame(width: vertical ? 1 : size.width, height: vertical ? size.height : 1)
             .offset(x: vertical ? frame.minX * e : 0, y: vertical ? 0 : frame.minY * e)
             .opacity(p < 0 ? 0 : fade)
+    }
+
+    /// A comment: the pin pops in where the cursor clicks, the note opens beside
+    /// the piece, folds back into the pin when the next comment starts, and the
+    /// pins clear away as the build wraps up.
+    @ViewBuilder
+    private func note(_ note: SwarmBuild.Note, frame f: CGRect, size: CGSize, time: Double) -> some View {
+        let step = note.step
+        let who = step.cursor >= 0 && step.cursor < build.cursors.count ? build.cursors[step.cursor] : nil
+        let color = who?.color ?? SwarmBuild.Cursor.blue
+        let at = SwarmBuild.pinPoint(f, in: size)
+        let pop = (time - (step.start + step.length * 0.3)) / 0.3
+        let clear = 1 - SwarmCurve.inOut((time - build.wrap) / 0.4)
+        let lingers = 1 - SwarmCurve.inOut((time - note.closes - 0.35) / 0.35)
+        let open = SwarmCurve.out((time - (step.start + step.length * 0.45)) / 0.3)
+            * (1 - SwarmCurve.inOut((time - note.closes) / 0.3))
+        let width = min(300, size.width - 32)
+        let top = Self.cardOnTop(step, frame: f, size: size)
+
+        if pop > 0 {
+            // the note card, in the half of the screen away from the pin
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 7) {
+                    Circle()
+                        .fill(color)
+                        .frame(width: 20, height: 20)
+                        .overlay(Text("\(note.number)").font(.system(size: 10.5, weight: .bold)).foregroundStyle(.white))
+                    Text(who?.name ?? "Design note")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(SwarmInk.ink)
+                    Text("now")
+                        .font(.system(size: 12))
+                        .foregroundStyle(SwarmInk.ink.opacity(0.4))
+                }
+                Text(note.text)
+                    .font(.system(size: 14))
+                    .foregroundStyle(SwarmInk.ink)
+                    .lineSpacing(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 13)
+            .padding(.vertical, 11)
+            .frame(width: width, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.white))
+            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(.black.opacity(0.06)))
+            .shadow(color: .black.opacity(0.18), radius: 14, x: 0, y: 5)
+            .scaleEffect(0.92 + 0.08 * open, anchor: top ? .top : .bottom)
+            .offset(y: CGFloat(1 - open) * (top ? -8 : 8))
+            .opacity(open * clear)
+            .padding(.top, 64)
+            .padding(.bottom, 46)
+            .frame(width: size.width, height: size.height, alignment: top ? .top : .bottom)
+
+            // the pin: round, with its point at the spot
+            UnevenRoundedRectangle(topLeadingRadius: 13, bottomLeadingRadius: 2, bottomTrailingRadius: 13,
+                                   topTrailingRadius: 13, style: .continuous)
+                .fill(color)
+                .overlay(UnevenRoundedRectangle(topLeadingRadius: 13, bottomLeadingRadius: 2, bottomTrailingRadius: 13,
+                                                topTrailingRadius: 13, style: .continuous)
+                    .strokeBorder(.white, lineWidth: 2))
+                .overlay(Text("\(note.number)").font(.system(size: 11, weight: .bold)).foregroundStyle(.white))
+                .frame(width: 26, height: 26)
+                .shadow(color: .black.opacity(0.22), radius: 3, x: 0, y: 1.5)
+                .scaleEffect(CGFloat(SwarmCurve.back(pop)), anchor: .bottomLeading)
+                .opacity(clear * lingers)
+                .offset(x: at.x, y: at.y - 26)
+        }
+    }
+
+    /// A note card goes in the half of the screen away from its pin, unless told.
+    private static func cardOnTop(_ step: SwarmBuild.Step, frame f: CGRect, size: CGSize) -> Bool {
+        if case .comment(_, _, let place?) = step.move { return place == .top }
+        return f.midY > size.height / 2
     }
 
     /// Multiplayer arrow: the collaborator's colour, a white edge, an optional name tag.

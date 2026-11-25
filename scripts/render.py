@@ -2,6 +2,8 @@
 """Turn a take into the finished videos.
 
     python3 render.py <take.mov> --out ~/Movies/Swarm/MyApp-Home [--duration 12]
+    python3 render.py <take.mov> --out ~/Movies/Swarm/MyApp-Home-decisions --mode decisions \
+        --decisions decisions.json [--vertical]
 
 Finds where the build starts and stops on its own (the first and last frames
 where anything moves). Then it cuts from just before the first cursor to a
@@ -11,16 +13,29 @@ held finished screen, and writes:
   <out>-screen.mp4   the bare screen recording, same cut, 60 fps
   <out>-sheet.png    a contact sheet (2 frames a second) to check the motion
 
---duration  total length in seconds (default 12). A build that runs longer
-            than this keeps its natural length plus a one-second hold.
+--mode build      (default) the 12 s swarm build film
+--mode decisions  a Before → After film: it holds on the old screen first
+                  (--before-hold, default 1.8 s) with a "Before" label under
+                  the phone, swaps to "After" once the decisions are made,
+                  holds (--after-hold, default 1.6 s), then crossfades to an
+                  end card (--card, default 3.2 s): the two screens side by
+                  side with the decisions listed under them. Also writes
+                  <out>-compare.png, that end card as a still.
+--decisions FILE  JSON with the end card's text:
+                  {"title": "What changed", "decisions": [{"title": "...", "why": "..."}]}
+--vertical        also write <out>-9x16.mp4 (1080x1920) for stories and reels.
+--duration  total length in seconds before any end card (default 12 for a
+            build, natural length for decisions). A build that runs longer
+            than this keeps its natural length plus a hold.
 --start/--end  override the detected cut (seconds into the take).
 """
-import argparse, json, os, shutil, subprocess, sys
+import argparse, json, os, shutil, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ASSETS = os.path.join(HERE, '..', 'assets')
 LEAD = 0.45      # empty page shown before the first cursor arrives
 HOLD = 1.0       # finished screen held after the last thing moves
+PLATE = '0xF5F5F7'   # the plate colour, for the end card
 
 
 def run(cmd, **kw):
@@ -77,12 +92,23 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('take')
     ap.add_argument('--out', required=True)
-    ap.add_argument('--duration', type=float, default=12)
+    ap.add_argument('--mode', choices=['build', 'decisions'], default='build')
+    ap.add_argument('--duration', type=float)
     ap.add_argument('--start', type=float)
     ap.add_argument('--end', type=float)
+    ap.add_argument('--before-hold', type=float)
+    ap.add_argument('--after-hold', type=float)
+    ap.add_argument('--card', type=float)
+    ap.add_argument('--decisions')
+    ap.add_argument('--vertical', action='store_true')
     o = ap.parse_args()
     if not shutil.which('ffmpeg'):
         sys.exit('ffmpeg is not installed (brew install ffmpeg).')
+    decisions = o.mode == 'decisions'
+    lead = o.before_hold if o.before_hold is not None else (1.8 if decisions else LEAD)
+    hold = o.after_hold if o.after_hold is not None else (1.6 if decisions else HOLD)
+    want = o.duration if o.duration is not None else (0.0 if decisions else 12.0)
+    card = (o.card if o.card is not None else 3.2) if decisions else 0.0
 
     take = os.path.abspath(o.take)
     out = os.path.abspath(os.path.expanduser(o.out))
@@ -93,48 +119,147 @@ def main():
     if first is None and o.start is None:
         sys.exit('Nothing moves in this take. The build never started: check that the screen has '
                  '.swarmStage(build), that the app opens on it with -swarm, and that -swarm-cue works.')
-    start = o.start if o.start is not None else max(0.0, first - LEAD)
-    end = o.end if o.end is not None else last + HOLD
+    start = o.start if o.start is not None else max(0.0, first - lead)
+    end = o.end if o.end is not None else last + hold
     natural = end - start
-    dur = max(natural, o.duration) if o.end is None else natural
+    dur = max(natural, want) if o.end is None else natural
     pad = max(0.0, start + dur - length) + 0.1
     moves = f'{first:.2f}–{last:.2f} s' if first is not None else 'not detected'
+    if decisions and first is not None and first - lead < 0:
+        print(f'warning: only {first:.2f} s of the Before screen in the take; record with a longer '
+              f'--settle to get the full {lead:g} s hold', file=sys.stderr)
     print(f'build moves {moves}; cut {start:.2f} s for {dur:.2f} s'
-          + (f' (longer than {o.duration:g} s)' if natural > o.duration else ''), file=sys.stderr)
+          + (f' (longer than {want:g} s)' if want and natural > want else '')
+          + (f' + {card:g} s end card' if card else ''), file=sys.stderr)
 
     g = json.load(open(os.path.join(ASSETS, 'geom.json')))
     color = ['-colorspace', 'bt709', '-color_primaries', 'bt709', '-color_trc', 'bt709']
     enc = ['-c:v', 'libx264', '-preset', 'medium', '-crf', '16', '-r', '60', '-pix_fmt', 'yuv420p', *color,
            '-movflags', '+faststart', '-an']
-    clip = f'setpts=PTS-STARTPTS,fps=60,tpad=stop_mode=clone:stop_duration={pad:.2f}'
+    # The simulator only writes a frame when the screen changes, so a still
+    # stretch has no frames at all. Make it 60 fps first, then trim: seeking
+    # into a gap would start the cut at the next change instead.
+    clip = f'fps=60,trim=start={start:.3f},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={pad:.2f}'
+    tmp = tempfile.mkdtemp(prefix='swarm-render-')
+    main_mp4 = os.path.join(tmp, 'main.mp4') if decisions else out + '.mp4'
 
-    # the phone mockup
+    # the phone mockup (for decisions: with the Before / After label under it)
     still = ['-loop', '1', '-framerate', '60', '-t', f'{dur + 0.5:.2f}']
-    run(['ffmpeg', '-v', 'error', '-y', '-ss', f'{start:.3f}', '-i', take,
+    labels, label_inputs = '', []
+    if decisions:
+        layers = text_layers(tmp, g, o.decisions)
+        before_ends = (first - start) if first is not None else min(lead, dur)
+        after_from = (last - start + 0.15) if last is not None else max(0, dur - hold)
+        label_inputs = [*still, '-i', layers['chip-before'], *still, '-i', layers['chip-after']]
+        labels = (f"[4:v]format=rgba,fade=t=out:st={max(0, before_ends - 0.3):.2f}:d=0.3:alpha=1[cb];"
+                  f"[5:v]format=rgba,fade=t=in:st={after_from:.2f}:d=0.35:alpha=1[ca];"
+                  f"[ph][cb]overlay=0:0:format=rgb:shortest=1[p1];[p1][ca]overlay=0:0:format=rgb:shortest=1,")
+    phone = (f"[0:v]{clip},scale={g['sw']}:{g['sh']}:flags=lanczos,format=rgba[v];"
+             f"[1:v]format=gray[m];[v][m]alphamerge[vm];"
+             f"[vm][3:v]overlay=0:0:format=rgb:shortest=1[vs];"
+             f"[2:v][vs]overlay={g['sx']}:{g['sy']}:format=rgb:shortest=1")
+    phone += (',format=rgba[ph];' + labels) if decisions else ','
+    run(['ffmpeg', '-v', 'error', '-y', '-i', take,
          *still, '-i', os.path.join(ASSETS, 'screen_mask.png'),
          *still, '-i', os.path.join(ASSETS, 'base.png'),
          *still, '-i', os.path.join(ASSETS, 'screen_over.png'),
+         *label_inputs,
          '-filter_complex',
-         f"[0:v]{clip},scale={g['sw']}:{g['sh']}:flags=lanczos,format=rgba[v];"
-         f"[1:v]format=gray[m];[v][m]alphamerge[vm];"
-         f"[vm][3:v]overlay=0:0:format=rgb:shortest=1[vs];"
-         f"[2:v][vs]overlay={g['sx']}:{g['sy']}:format=rgb:shortest=1,"
-         f"scale=out_color_matrix=bt709:out_range=tv,format=yuv420p[out]",
-         '-map', '[out]', '-t', f'{dur:.3f}', *enc, out + '.mp4'])
+         phone + "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p[out]",
+         '-map', '[out]', '-t', f'{dur:.3f}', *enc, main_mp4])
 
     # the bare screen
-    run(['ffmpeg', '-v', 'error', '-y', '-ss', f'{start:.3f}', '-i', take,
+    run(['ffmpeg', '-v', 'error', '-y', '-i', take,
          '-vf', f'{clip},scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p',
          '-t', f'{dur:.3f}', *enc, out + '-screen.mp4'])
 
+    written = [out + '.mp4', out + '-screen.mp4']
+    if decisions:
+        compare = out + '-compare.png'
+        end_card(main_mp4, dur, layers, g, compare, tmp)
+        # the film, crossfading into the end card
+        fade = 0.6
+        run(['ffmpeg', '-v', 'error', '-y', '-i', main_mp4,
+             '-loop', '1', '-framerate', '60', '-t', f'{card + fade:.2f}', '-i', compare,
+             '-filter_complex',
+             f"[1:v]fps=60,format=yuv420p,setsar=1,settb=1/60[c];[0:v]fps=60,setsar=1,settb=1/60[f];"
+             f"[f][c]xfade=transition=fade:duration={fade}:offset={dur - fade:.3f},format=yuv420p[out]",
+             '-map', '[out]', *enc, out + '.mp4'])
+        written.append(compare)
+
+    if o.vertical:
+        # 4:5 into 9:16, the plate smeared up and down so there's no seam
+        run(['ffmpeg', '-v', 'error', '-y', '-i', out + '.mp4', '-filter_complex',
+             '[0:v]scale=1080:1350:flags=lanczos,split=3[m][t][b];'
+             '[t]crop=1080:2:0:0,scale=1080:285[top];[b]crop=1080:2:0:1348,scale=1080:285[bot];'
+             '[top][m][bot]vstack=inputs=3,format=yuv420p', *enc, out + '-9x16.mp4'])
+        written.append(out + '-9x16.mp4')
+
     # a contact sheet to look at
+    total = dur + card
     cols = 8
-    rows = max(1, int((dur * 2 + cols - 1) // cols))
+    rows = max(1, int((total * 2 + cols - 1) // cols))
     run(['ffmpeg', '-v', 'error', '-y', '-i', out + '.mp4', '-vf',
          f'fps=2,scale=240:-1,tile={cols}x{rows}:padding=4:color=gray', '-frames:v', '1', out + '-sheet.png'])
+    written.append(out + '-sheet.png')
+    shutil.rmtree(tmp, ignore_errors=True)
 
-    for f in (out + '.mp4', out + '-screen.mp4', out + '-sheet.png'):
+    for f in written:
         print(f)
+
+
+def phone_boxes(g):
+    """Where the end card's two phones go: the crop around one phone (with its
+    shadow) and its two scaled-down places."""
+    # the phone and a little of its shadow, stopping above the label under it;
+    # even sizes, like the video
+    crop = (g['sx'] - 50, g['sy'] - 45, (g['sw'] + 100) // 2 * 2, (g['sh'] + 88) // 2 * 2)
+    k = 0.56
+    pw, ph = int(crop[2] * k) // 2 * 2, int(crop[3] * k) // 2 * 2
+    gap, top = 140, 200
+    left = (g['W'] // 2 - gap // 2 - pw, top, pw, ph)
+    right = (g['W'] // 2 + gap // 2, top, pw, ph)
+    return crop, left, right
+
+
+def text_layers(tmp, g, decisions_path):
+    """The Before / After labels and the end card's words, drawn by card.swift."""
+    if not shutil.which('swift'):
+        sys.exit('decisions mode needs Swift (it comes with Xcode) to draw its labels.')
+    crop, left, right = phone_boxes(g)
+    spec = {'W': g['W'], 'H': g['H'], 'chipY': (g['sy'] + g['sh'] + g['H']) // 2 + 8,
+            'phones': [list(left), list(right)]}
+    if decisions_path:
+        spec.update(json.load(open(os.path.expanduser(decisions_path))))
+    path = os.path.join(tmp, 'spec.json')
+    json.dump(spec, open(path, 'w'))
+    run(['swift', os.path.join(HERE, 'card.swift'), path, tmp])
+    return {k: os.path.join(tmp, k + '.png') for k in ('chip-before', 'chip-after', 'card-text')}
+
+
+def end_card(film, dur, layers, g, out, tmp):
+    """The two screens side by side: the first and last frames of the film."""
+    crop, left, right = phone_boxes(g)
+    cx, cy, cw, ch = crop
+    shots = []
+    for name, t in (('before', 0.05), ('after', dur - 0.05)):
+        path = os.path.join(tmp, name + '.png')
+        run(['ffmpeg', '-v', 'error', '-y', '-ss', f'{max(0, t):.3f}', '-i', film, '-frames:v', '1',
+             '-vf', f'crop={cw}:{ch}:{cx}:{cy}', path])
+        shots.append(path)
+    feather = 50
+    soft = (f"geq=lum='255*clip(min(min(X,W-1-X),min(Y,H-1-Y))/{feather},0,1)'")
+    run(['ffmpeg', '-v', 'error', '-y',
+         '-f', 'lavfi', '-i', f"color=c={PLATE}:s={g['W']}x{g['H']}",
+         '-i', shots[0], '-i', shots[1], '-i', layers['card-text'],
+         '-f', 'lavfi', '-i', f'color=c=white:s={cw}x{ch},format=gray,{soft}',
+         '-filter_complex',
+         f"[4:v]split[m1][m2];"
+         f"[1:v]format=rgba[b0];[b0][m1]alphamerge,scale={left[2]}:{left[3]}:flags=lanczos[b];"
+         f"[2:v]format=rgba[a0];[a0][m2]alphamerge,scale={right[2]}:{right[3]}:flags=lanczos[a];"
+         f"[0:v][b]overlay={left[0]}:{left[1]}[p1];[p1][a]overlay={right[0]}:{right[1]}[p2];"
+         f"[p2][3:v]overlay=0:0,format=rgb24",
+         '-frames:v', '1', out])
 
 
 if __name__ == '__main__':
